@@ -8,7 +8,8 @@
   # Leave pg un-bundled so esbuild doesn't trip on its dynamic requires.
   external_node_modules = ["pg"]
 
-# Scheduled function: Monday 12:00 UTC (8 AM EDT / 7 AM EST).
-# Netlify cron is UTC and ignores DST. Use "0 13 * * 1" to never run before 8 AM.
+# Poll every 15 minutes. The function reads the day/time you set in the UI
+# (stored in the backup_settings table) and only runs the backup when it matches.
+# Do NOT encode the day/time here — change it in the UI instead.
 [functions."supabase-backup"]
-  schedule = "0 12 * * 1"
+  schedule = "0,15,30,45 * * * *"

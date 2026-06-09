@@ -1,114 +1,100 @@
-# Supabase Backup → Email
+# Supabase Backup → Email (with web UI)
 
-Automatically emails a CSV backup of **every table** in your Supabase project,
-zipped, every **Monday at 8 AM Eastern**. Runs as a Netlify scheduled function —
-no server to manage, no manual steps once deployed.
+Emails a zipped CSV backup of **every table** in your Supabase project, on a
+schedule you control from a small web UI. Runs entirely on Netlify Functions —
+no server to manage.
 
-It connects to the **same Supabase project** as the Order Entry App, but uses the
-Postgres connection string instead of the browser anon key, so it can read all
-tables regardless of Row Level Security (which is what you want for a backup).
+It connects to the **same Supabase project** as the Order Entry App, using the
+Postgres connection string (not the browser anon key), so it can read every
+table regardless of Row Level Security.
 
-## What it does
+## What you get
 
-1. Connects to your Supabase Postgres database.
-2. Finds every base table in the `public` schema (configurable).
-3. Dumps each table to a CSV file (one file per table).
-4. Adds a `_manifest.txt` with row counts and a timestamp.
-5. Zips everything into `supabase-backup-YYYY-MM-DD.zip`.
-6. Emails the zip to you.
+- **Back up now** — a button that runs the backup immediately and emails the zip.
+- **Schedule editor** — pick the day and time (Eastern); it's honored to the
+  quarter-hour, with daylight saving handled automatically. Toggle it on/off.
+- **Status** — shows when the last backup ran and whether it succeeded.
+
+## How the schedule works
+
+Netlify can't change a function's cron at runtime, so the scheduled function
+runs every 15 minutes as a lightweight **poller**: it reads the day/time you
+saved (stored in a `backup_settings` table) and only runs the actual backup when
+the current Eastern time matches. Changing the schedule in the UI just updates
+that row — no redeploy needed.
+
+The `backup_settings` table is created automatically on first run (a single row).
+It lives in `public`, so it's included in the backups too.
 
 ## Files
 
 ```
-netlify/functions/supabase-backup.js   Scheduled job (Monday 8 AM ET)
-netlify/functions/backup-now.js        On-demand trigger for testing (token-gated)
-src/runBackup.js                       Core: connect, dump, zip, email
-src/csv.js                             CSV serializer (RFC 4180)
+public/index.html                      The web UI (run now + schedule editor)
+netlify/functions/supabase-backup.js   Poller: every 15 min, runs backup when due
+netlify/functions/backup-now.js        On-demand backup (UI "Back up now")
+netlify/functions/backup-config.js     Read/update the schedule (UI)
+src/runBackup.js                        Core: dump tables → CSV → zip → email
+src/settings.js                         The backup_settings table (schedule + status)
+src/db.js                              Postgres connection helper
 src/email.js                           SMTP email via nodemailer
-.env.example                           All environment variables, documented
-netlify.toml                           Functions config (no site build)
+src/csv.js                             CSV serializer (RFC 4180)
+src/easternTime.js                     Eastern-time helper for scheduling
+src/auth.js                            Shared token gate for the HTTP endpoints
 ```
 
 ## One-time setup
 
 ### 1. Create the repo and a new Netlify site
-This is a **separate** Netlify site from the Order Entry App (like your Front
-webhook). Push these files to a new GitHub repo and create a new Netlify site
-from it. Because there's no build step, it deploys in seconds.
+This is a **separate** Netlify site from the Order Entry App. Push these files to
+a new GitHub repo and create a Netlify site from it. There's no build step, so it
+deploys in seconds.
 
-### 2. Get your Supabase connection string
-Supabase dashboard → your project (the same one the Order Entry App uses) →
-**Connect** → **Session pooler** → copy the URI and insert your database
-password. Set it as `SUPABASE_DB_URL`.
-
-### 3. Set up email (Gmail example)
-Because you're emailing yourself, SMTP to your own inbox is simplest:
-1. Make sure 2-Step Verification is on for your Google account.
-2. Google Account → Security → **App passwords** → generate one.
-3. Use it as `SMTP_PASS` (host `smtp.gmail.com`, port `465`,
-   user = your Gmail address).
-
-Any SMTP provider works (Outlook, Fastmail, a transactional service, etc.) —
-just set the four `SMTP_*` variables accordingly.
-
-### 4. Add environment variables in Netlify
-Site settings → **Environment variables**. Add everything from `.env.example`
-that isn't commented out:
+### 2. Environment variables (Netlify → Site settings → Environment variables)
 
 | Variable | Required | Notes |
 |---|---|---|
-| `SUPABASE_DB_URL` | yes | Session pooler connection string |
+| `SUPABASE_DB_URL` | yes | Session pooler connection string (same project as Order Entry) |
 | `SMTP_HOST` | yes | e.g. `smtp.gmail.com` |
 | `SMTP_PORT` | yes | `465` (TLS) or `587` |
 | `SMTP_USER` | yes | your email address |
 | `SMTP_PASS` | yes | app password / SMTP password |
 | `BACKUP_TO` | yes | where the backup is sent |
+| `BACKUP_TRIGGER_TOKEN` | **yes (for the UI)** | the password the UI uses to call the backup/config endpoints; without it the UI can't do anything |
 | `BACKUP_FROM` | no | defaults to `SMTP_USER` |
 | `BACKUP_SCHEMAS` | no | defaults to `public` |
-| `BACKUP_TRIGGER_TOKEN` | no | enables the manual test endpoint |
 
-Redeploy after adding variables so the function picks them up.
+See `.env.example` for where to find each value (Supabase connection string,
+Gmail app password, etc.). Redeploy after adding variables.
 
-## Testing it now (don't wait until Monday)
+### 3. Use the UI
+Open your site's URL (e.g. `https://YOUR-SITE.netlify.app`). Enter your
+`BACKUP_TRIGGER_TOKEN`, click **Remember on this device**, then:
+- **Run backup & email it** to back up right now, or
+- set the **day and time** and **Save schedule**.
 
-Set `BACKUP_TRIGGER_TOKEN` to a long random string in Netlify, redeploy, then
-visit:
+The token is stored only in your browser (localStorage) for convenience; the real
+security is the token check on the server endpoints.
 
-```
-https://YOUR-SITE.netlify.app/.netlify/functions/backup-now?token=YOUR_TOKEN
-```
+## The poll cadence (netlify.toml)
 
-It runs the full backup immediately and returns a JSON summary. Check your
-inbox for the zip. You can also trigger the scheduled function from the Netlify
-dashboard (Functions → `supabase-backup` → run).
-
-To test locally instead: `npm install`, copy `.env.example` to `.env`, fill it
-in, then `npm run backup`.
-
-## The schedule and Daylight Saving Time
-
-Netlify cron runs in **UTC** and does not adjust for DST. The schedule lives in `netlify.toml`
-(`[functions."supabase-backup"]`). The default `0 12 * * 1` means Monday 12:00 UTC:
-- **8:00 AM** during Eastern Daylight Time (mid-March → early November)
-- **7:00 AM** during Eastern Standard Time (early November → mid-March)
-
-For a weekly backup the exact hour is unimportant. If you'd rather it never
-arrive before 8 AM, change the schedule in `netlify.toml` to `0 13 * * 1` and push.
+`netlify.toml` schedules the poller at `0,15,30,45 * * * *` (every 15 minutes).
+That's just how often it *checks* — the actual day/time comes from the UI. You
+shouldn't need to touch the cron.
 
 ## Notes & limits
 
-- **Attachment size:** Gmail and most providers cap attachments around 25 MB.
-  The function warns in the logs if the zip exceeds ~24 MB. CSVs compress well,
-  so this is unlikely for typical internal tables, but if you outgrow it the
-  natural next step is uploading the zip to storage (e.g. a Supabase Storage
-  bucket or S3) and emailing a link instead.
-- **CSV conventions:** SQL `NULL` is written as an empty unquoted field; an
-  empty string is written as `""`; `json`/`jsonb`/array columns are
-  JSON-encoded; `bytea` is hex (`\x...`); timestamps are ISO 8601. All other
-  fields are double-quoted with internal quotes doubled (RFC 4180), so the
-  files import cleanly into Excel, Google Sheets, or back into Postgres.
-- **Views** are intentionally skipped (only base tables are backed up).
-- One failing table won't abort the run — it's recorded in `_manifest.txt`
-  and the rest still back up.
-- Keep `SUPABASE_DB_URL` and `SMTP_PASS` in Netlify env vars only. Never commit
-  `.env`.
+- **Function timeout:** the "Back up now" endpoint runs synchronously, so a very
+  large database could exceed Netlify's function timeout (~10s by default). If you
+  hit that, raise the timeout in Netlify's function settings, or convert the
+  backup to a background function. For typical internal tables it finishes in a
+  few seconds.
+- **Attachment size:** most email providers cap attachments around 25 MB. The
+  function warns in the logs above ~24 MB. If you outgrow it, upload the zip to a
+  storage bucket and email a link instead.
+- **CSV conventions:** SQL `NULL` → empty unquoted field; empty string → `""`;
+  `json`/`jsonb`/arrays → JSON-encoded; `bytea` → hex (`\x…`); timestamps → ISO
+  8601; everything else double-quoted (RFC 4180). Imports cleanly into Excel,
+  Sheets, or back into Postgres.
+- **Views** are skipped (base tables only). One failing table won't abort the run.
+- Keep `SUPABASE_DB_URL`, `SMTP_PASS`, and `BACKUP_TRIGGER_TOKEN` in Netlify env
+  vars only. Never commit `.env`.

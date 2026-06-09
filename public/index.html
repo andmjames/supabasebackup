@@ -1,4 +1,232 @@
 <!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Supabase Backup</title>
-<p>This site runs a scheduled Netlify function that emails a CSV backup of all Supabase tables every Monday. There is no UI.</p>
+<style>
+  :root {
+    --ink: #16201c; --muted: #5c6b63; --line: #e2e4df; --paper: #fbfbf9; --card: #ffffff;
+    --accent: #1b6b4f; --accent-press: #14543e; --danger: #9a2f2f;
+    --console: #0f211b; --console-ink: #cfe7da; --console-dim: #6f8c7e; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 660px; margin: 0 auto; padding: 40px 20px 80px; }
+  header { margin-bottom: 28px; }
+  h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0; font-size: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; margin-top: 18px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 16px; font-weight: 600; }
+  label { display: block; font-size: 13px; font-weight: 550; margin-bottom: 6px; }
+  .field { margin-bottom: 16px; }
+  input[type="text"], input[type="password"], select { width: 100%; padding: 10px 12px; font-size: 15px; color: var(--ink);
+    background: #fff; border: 1px solid var(--line); border-radius: 8px; font-family: inherit; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > .field { flex: 1; min-width: 140px; }
+  .toggle { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+  .toggle input { width: 18px; height: 18px; accent-color: var(--accent); }
+  .toggle label { margin: 0; font-weight: 550; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 8px; cursor: pointer; padding: 11px 18px;
+    transition: background .12s ease, transform .04s ease; }
+  button:active { transform: translateY(1px); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-press); }
+  .btn-secondary { background: #eef0ec; color: var(--ink); }
+  .btn-secondary:hover { background: #e4e7e1; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .hint { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
+  .summary { font-size: 14px; margin: 0 0 16px; padding: 12px 14px; background: #f3f6f3; border: 1px solid var(--line); border-radius: 8px; }
+  .summary strong { font-weight: 650; }
+  .console { background: var(--console); color: var(--console-ink); border-radius: 8px;
+    font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding: 14px 16px;
+    white-space: pre-wrap; word-break: break-word; margin-top: 14px; min-height: 20px; }
+  .console .dim { color: var(--console-dim); }
+  .console .good { color: #7ee0b0; }
+  .console .bad { color: #f3a3a3; }
+  .spin { display: inline-block; animation: blink 1s steps(2,start) infinite; }
+  @keyframes blink { to { visibility: hidden; } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } button { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Supabase Backup</h1>
+    <p class="sub">Email a CSV backup of every table now, or set the weekly schedule. Times are Eastern.</p>
+  </header>
+
+  <div class="card">
+    <h2>Access</h2>
+    <div class="field" style="margin-bottom:8px">
+      <label for="token">Backup token</label>
+      <input id="token" type="password" placeholder="Your BACKUP_TRIGGER_TOKEN" autocomplete="off">
+    </div>
+    <div class="row" style="align-items:center">
+      <button class="btn-secondary" id="saveToken" type="button">Remember on this device</button>
+      <span class="hint" id="tokenState" style="margin-top:0"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Back up now</h2>
+    <button class="btn-primary" id="runNow" type="button">Run backup &amp; email it</button>
+    <p class="hint">Runs immediately and emails the zip to your configured address. Can take up to ~30 seconds.</p>
+    <div class="console" id="runOut"><span class="dim">Ready.</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Schedule</h2>
+    <div class="summary" id="schedSummary"><span class="dim">Loading current schedule&hellip;</span></div>
+    <div class="toggle">
+      <input id="enabled" type="checkbox" checked>
+      <label for="enabled">Scheduled backups on</label>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="day">Day</label>
+        <select id="day"></select>
+      </div>
+      <div class="field">
+        <label for="time">Time (Eastern)</label>
+        <select id="time"></select>
+      </div>
+    </div>
+    <button class="btn-primary" id="saveSched" type="button">Save schedule</button>
+    <p class="hint">Backups are checked every 15 minutes, so the chosen time is honored to the quarter-hour. Daylight saving is handled automatically.</p>
+    <div class="console" id="schedOut"><span class="dim">&mdash;</span></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var TOKEN_KEY = 'pmi_supabase_backup_token';
+  var $ = function (id) { return document.getElementById(id); };
+  var DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+  var saved = '';
+  try { saved = localStorage.getItem(TOKEN_KEY) || ''; } catch (e) {}
+  if (saved) { $('token').value = saved; $('tokenState').textContent = 'Token remembered on this device.'; }
+
+  function token() { return $('token').value.trim(); }
+
+  $('saveToken').addEventListener('click', function () {
+    try { localStorage.setItem(TOKEN_KEY, token()); $('tokenState').textContent = 'Saved on this device.'; }
+    catch (e) { $('tokenState').textContent = 'Could not save (storage blocked).'; }
+    loadConfig();
+  });
+
+  function headers() { return { 'Content-Type': 'application/json', 'x-backup-token': token() }; }
+
+  function authMessage(status) {
+    if (status === 404) return 'Endpoint is disabled. Set BACKUP_TRIGGER_TOKEN in Netlify and redeploy.';
+    if (status === 401) return 'Token does not match. Check the value against Netlify.';
+    return 'Request failed (HTTP ' + status + ').';
+  }
+
+  (function buildPickers() {
+    var d = $('day');
+    DAYS.forEach(function (name, i) { var o = document.createElement('option'); o.value = i; o.textContent = name; d.appendChild(o); });
+    d.value = 1;
+    var t = $('time');
+    for (var h = 0; h < 24; h++) {
+      for (var m = 0; m < 60; m += 15) {
+        var o = document.createElement('option');
+        o.value = h + ':' + m;
+        var ampm = h < 12 ? 'AM' : 'PM'; var h12 = (h % 12) || 12;
+        o.textContent = h12 + ':' + (m < 10 ? '0' + m : m) + ' ' + ampm;
+        t.appendChild(o);
+      }
+    }
+    t.value = '8:0';
+  })();
+
+  function timeLabel(hour, minute) {
+    var ampm = hour < 12 ? 'AM' : 'PM'; var h12 = (hour % 12) || 12;
+    return h12 + ':' + (minute < 10 ? '0' + minute : minute) + ' ' + ampm;
+  }
+
+  function easternStamp(iso) {
+    if (!iso) return null;
+    try {
+      return new Date(iso).toLocaleString('en-US', {
+        timeZone: 'America/Indiana/Indianapolis',
+        weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+      }) + ' ET';
+    } catch (e) { return iso; }
+  }
+
+  function renderSummary(cfg) {
+    var when = 'every ' + DAYS[cfg.day_of_week] + ' at ' + timeLabel(cfg.hour, cfg.minute) + ' Eastern';
+    $('schedSummary').innerHTML = cfg.enabled
+      ? '<strong>On</strong> &mdash; backups run ' + when + '.'
+      : '<strong>Paused</strong> &mdash; would run ' + when + ' when re-enabled.';
+    var last = easternStamp(cfg.last_run_at);
+    var lines = [];
+    if (last) {
+      var ok = (cfg.last_status || '').indexOf('error') === -1;
+      lines.push('last backup  ' + last);
+      lines.push('<span class="' + (ok ? 'good' : 'bad') + '">' + (cfg.last_status || '') + '</span>');
+    } else { lines.push('<span class="dim">No backup has run yet.</span>'); }
+    $('schedOut').innerHTML = lines.join('\n');
+  }
+
+  function loadConfig() {
+    if (!token()) { $('schedSummary').innerHTML = '<span class="dim">Enter your token to load the schedule.</span>'; return; }
+    fetch('/.netlify/functions/backup-config', { headers: headers() })
+      .then(function (r) { if (!r.ok) throw { status: r.status }; return r.json(); })
+      .then(function (cfg) {
+        $('enabled').checked = !!cfg.enabled;
+        $('day').value = cfg.day_of_week;
+        $('time').value = cfg.hour + ':' + cfg.minute;
+        renderSummary(cfg);
+      })
+      .catch(function (e) { $('schedSummary').innerHTML = '<span style="color:var(--danger)">' + authMessage(e.status || 0) + '</span>'; });
+  }
+
+  $('saveSched').addEventListener('click', function () {
+    if (!token()) { $('schedOut').innerHTML = '<span class="bad">Enter your token first.</span>'; return; }
+    var parts = $('time').value.split(':');
+    var payload = { enabled: $('enabled').checked, day_of_week: parseInt($('day').value, 10),
+      hour: parseInt(parts[0], 10), minute: parseInt(parts[1], 10) };
+    var btn = $('saveSched'); btn.disabled = true; var prev = btn.textContent; btn.textContent = 'Saving\u2026';
+    fetch('/.netlify/functions/backup-config', { method: 'POST', headers: headers(), body: JSON.stringify(payload) })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
+      .then(function (res) {
+        if (!res.ok) throw res;
+        renderSummary(res.body);
+        $('schedOut').innerHTML = '<span class="good">Schedule saved.</span>\n' + $('schedOut').innerHTML;
+      })
+      .catch(function (e) { var msg = (e.body && e.body.error) || authMessage(e.status || 0); $('schedOut').innerHTML = '<span class="bad">' + msg + '</span>'; })
+      .finally(function () { btn.disabled = false; btn.textContent = prev; });
+  });
+
+  $('runNow').addEventListener('click', function () {
+    if (!token()) { $('runOut').innerHTML = '<span class="bad">Enter your token first.</span>'; return; }
+    var btn = $('runNow'); btn.disabled = true; var prev = btn.textContent; btn.textContent = 'Running\u2026';
+    $('runOut').innerHTML = '<span class="dim">Dumping tables and sending email<span class="spin">\u2026</span></span>';
+    fetch('/.netlify/functions/backup-now', { method: 'POST', headers: headers() })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, status: r.status, body: b }; }); })
+      .then(function (res) {
+        if (!res.ok) throw res;
+        var s = res.body;
+        $('runOut').innerHTML =
+          '<span class="good">Backup emailed.</span>\n' +
+          'file    ' + s.filename + '\n' +
+          'tables  ' + s.tables + '\n' +
+          'rows    ' + s.totalRows + '\n' +
+          'size    ' + s.sizeMb + ' MB\n' +
+          'took    ' + s.elapsedSeconds + 's';
+        loadConfig();
+      })
+      .catch(function (e) { var msg = (e.body && e.body.error) || authMessage(e.status || 0); $('runOut').innerHTML = '<span class="bad">Backup failed.</span>\n' + msg; })
+      .finally(function () { btn.disabled = false; btn.textContent = prev; });
+  });
+
+  loadConfig();
+})();
+</script>
+</body>
+</html>
