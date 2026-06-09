@@ -1,13 +1,14 @@
-# No site build step — this project is only Netlify Functions.
+# Functions-only site — no front-end build.
 [build]
-  command = ""
+  command = "echo 'No build step — Netlify Functions only'"
   publish = "public"
 
 [functions]
   node_bundler = "esbuild"
-  # pg ships some optional native bits it can run without; keep it un-bundled
-  # so esbuild doesn't choke on its dynamic requires.
+  # Leave pg un-bundled so esbuild doesn't trip on its dynamic requires.
   external_node_modules = ["pg"]
 
-[build.environment]
-  NODE_VERSION = "18"
+# Scheduled function: Monday 12:00 UTC (8 AM EDT / 7 AM EST).
+# Netlify cron is UTC and ignores DST. Use "0 13 * * 1" to never run before 8 AM.
+[functions."supabase-backup"]
+  schedule = "0 12 * * 1"

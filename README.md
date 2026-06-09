@@ -65,7 +65,6 @@ that isn't commented out:
 | `BACKUP_TO` | yes | where the backup is sent |
 | `BACKUP_FROM` | no | defaults to `SMTP_USER` |
 | `BACKUP_SCHEMAS` | no | defaults to `public` |
-| `BACKUP_CRON` | no | defaults to `0 12 * * 1` |
 | `BACKUP_TRIGGER_TOKEN` | no | enables the manual test endpoint |
 
 Redeploy after adding variables so the function picks them up.
@@ -88,13 +87,13 @@ in, then `npm run backup`.
 
 ## The schedule and Daylight Saving Time
 
-Netlify cron runs in **UTC** and does not adjust for DST. The default
-`0 12 * * 1` means Monday 12:00 UTC:
+Netlify cron runs in **UTC** and does not adjust for DST. The schedule lives in `netlify.toml`
+(`[functions."supabase-backup"]`). The default `0 12 * * 1` means Monday 12:00 UTC:
 - **8:00 AM** during Eastern Daylight Time (mid-March → early November)
 - **7:00 AM** during Eastern Standard Time (early November → mid-March)
 
 For a weekly backup the exact hour is unimportant. If you'd rather it never
-arrive before 8 AM, set `BACKUP_CRON=0 13 * * 1`.
+arrive before 8 AM, change the schedule in `netlify.toml` to `0 13 * * 1` and push.
 
 ## Notes & limits
 
