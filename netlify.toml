@@ -1,0 +1,13 @@
+# No site build step — this project is only Netlify Functions.
+[build]
+  command = ""
+  publish = "public"
+
+[functions]
+  node_bundler = "esbuild"
+  # pg ships some optional native bits it can run without; keep it un-bundled
+  # so esbuild doesn't choke on its dynamic requires.
+  external_node_modules = ["pg"]
+
+[build.environment]
+  NODE_VERSION = "18"

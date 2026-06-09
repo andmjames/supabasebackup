@@ -1,0 +1,15 @@
+{
+  "name": "supabase-backup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Weekly automated CSV backup of all Supabase tables, emailed on a schedule via a Netlify scheduled function.",
+  "scripts": {
+    "backup": "node -e \"require('./src/runBackup').runBackup().then(r=>{console.log(r);process.exit(0)}).catch(e=>{console.error(e);process.exit(1)})\""
+  },
+  "dependencies": {
+    "@netlify/functions": "^2.8.1",
+    "jszip": "^3.10.1",
+    "nodemailer": "^6.9.14",
+    "pg": "^8.12.0"
+  }
+}
