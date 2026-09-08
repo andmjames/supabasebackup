@@ -3,20 +3,17 @@
 // Netlify BACKGROUND function. Dumps every table in the public schema to CSV,
 // zips them, and emails the zip.
 //
-// Memory-safe: each table is written straight to a file in /tmp and freed
-// before the next one, then the zip is streamed from disk. Peak memory stays
-// near the size of the single largest table, not the whole database — so it
-// won't hit Netlify's 1 GB ceiling as the data grows.
+// Memory-safe: each table is written to a file in /tmp, and the zip is built
+// by streaming those files from disk — nothing holds the whole database in
+// memory, so it won't hit Netlify's 1 GB ceiling as the data grows.
 //
-// Requires one dependency beyond what you already have:  archiver
-// Add it with:  npm install archiver
-//
-// Uses the same env vars you already have set:
+// No new dependencies. Uses jszip (already in this project), plus pg and
+// nodemailer, and the same env vars you already have set:
 //   SUPABASE_DB_URL, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, BACKUP_TO,
 //   BACKUP_TRIGGER_TOKEN
 
 const { Client } = require("pg");
-const archiver = require("archiver");
+const JSZip = require("jszip");
 const nodemailer = require("nodemailer");
 const fs = require("fs");
 const os = require("os");
@@ -61,9 +58,9 @@ exports.handler = async (event) => {
     );
 
     let totalRows = 0;
-    const files = [];
+    const zip = new JSZip();
 
-    // Dump each table to its own file, releasing it before the next table.
+    // Dump each table to its own file on disk, released before the next table.
     for (const { tablename } of tables) {
       const res = await client.query(`select * from "public"."${tablename.replace(/"/g, '""')}"`);
       const cols = res.fields.map((f) => f.name);
@@ -82,23 +79,29 @@ exports.handler = async (event) => {
         ws.end(resolve);
       });
 
-      files.push({ path: filePath, name: `${tablename}.csv` });
+      // Add the file to the zip as a stream — its contents stay on disk until
+      // the zip is generated, so memory doesn't balloon.
+      zip.file(`${tablename}.csv`, fs.createReadStream(filePath));
       totalRows += res.rows.length;
     }
 
     await client.end();
 
-    // Zip straight from disk to disk — archiver streams, so memory stays low.
+    // Generate the zip as a stream to disk (streamFiles keeps memory flat).
     const zipPath = path.join(tmp, "backup.zip");
     await new Promise((resolve, reject) => {
-      const output = fs.createWriteStream(zipPath);
-      const archive = archiver("zip", { zlib: { level: 6 } });
-      output.on("close", resolve);
-      output.on("error", reject);
-      archive.on("error", reject);
-      archive.pipe(output);
-      for (const f of files) archive.file(f.path, { name: f.name });
-      archive.finalize();
+      const out = fs.createWriteStream(zipPath);
+      out.on("finish", resolve);
+      out.on("error", reject);
+      zip
+        .generateNodeStream({
+          type: "nodebuffer",
+          streamFiles: true,
+          compression: "DEFLATE",
+          compressionOptions: { level: 6 },
+        })
+        .on("error", reject)
+        .pipe(out);
     });
 
     const sizeMb = (fs.statSync(zipPath).size / (1024 * 1024)).toFixed(1);

@@ -1,15 +1,4 @@
-# Functions-only site — no front-end build.
+# Static control panel is served from public/, functions from netlify/functions/.
 [build]
-  command = "echo 'No build step — Netlify Functions only'"
   publish = "public"
-
-[functions]
-  node_bundler = "esbuild"
-  # Leave pg un-bundled so esbuild doesn't trip on its dynamic requires.
-  external_node_modules = ["pg"]
-
-# Poll every 15 minutes. The function reads the day/time you set in the UI
-# (stored in the backup_settings table) and only runs the backup when it matches.
-# Do NOT encode the day/time here — change it in the UI instead.
-[functions."supabase-backup"]
-  schedule = "0,15,30,45 * * * *"
+  functions = "netlify/functions"
