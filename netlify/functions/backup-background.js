@@ -1,16 +1,20 @@
 // netlify/functions/backup-background.js
 //
 // Netlify BACKGROUND function. Dumps every table in the public schema to CSV,
-// zips them, and emails the zip.
+// zips them, uploads the zip to a private Supabase Storage bucket, and emails
+// a download LINK (not an attachment) — so it never hits Gmail's 25 MB cap.
 //
-// Memory-safe: each table is written to a file in /tmp, and the zip is built
-// by streaming those files from disk — nothing holds the whole database in
-// memory, so it won't hit Netlify's 1 GB ceiling as the data grows.
+// Memory-safe: each table is written to a file in /tmp and the zip is streamed
+// from disk, so memory stays flat regardless of database size.
 //
-// No new dependencies. Uses jszip (already in this project), plus pg and
-// nodemailer, and the same env vars you already have set:
-//   SUPABASE_DB_URL, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, BACKUP_TO,
-//   BACKUP_TRIGGER_TOKEN
+// No new dependencies (jszip is already in this project; pg + nodemailer too).
+//
+// Environment variables required (in Netlify):
+//   SUPABASE_DB_URL              - Postgres connection string (already set)
+//   SUPABASE_URL                 - e.g. https://zhvfcipveeeybczzmues.supabase.co   (NEW)
+//   SUPABASE_SERVICE_ROLE_KEY    - Supabase service_role secret key                (NEW)
+//   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, BACKUP_TO   (already set)
+//   BACKUP_TRIGGER_TOKEN         - gate for the trigger (already set)
 
 const { Client } = require("pg");
 const JSZip = require("jszip");
@@ -18,6 +22,10 @@ const nodemailer = require("nodemailer");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+
+const BUCKET = "db-backups";
+const LINK_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
+const KEEP_BACKUPS = 12;                     // prune older zips beyond this many
 
 function csvField(v) {
   if (v === null || v === undefined) return "";
@@ -44,6 +52,13 @@ exports.handler = async (event) => {
     return { statusCode: 401, body: "unauthorized" };
   }
 
+  const SUPABASE_URL = process.env.SUPABASE_URL;
+  const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!SUPABASE_URL || !SERVICE_KEY) {
+    console.error("backup failed: missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env var");
+    return { statusCode: 500, body: "backup failed: missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY" };
+  }
+
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "backup-"));
   const client = new Client({
     connectionString: process.env.SUPABASE_DB_URL,
@@ -60,7 +75,6 @@ exports.handler = async (event) => {
     let totalRows = 0;
     const zip = new JSZip();
 
-    // Dump each table to its own file on disk, released before the next table.
     for (const { tablename } of tables) {
       const res = await client.query(`select * from "public"."${tablename.replace(/"/g, '""')}"`);
       const cols = res.fields.map((f) => f.name);
@@ -79,15 +93,13 @@ exports.handler = async (event) => {
         ws.end(resolve);
       });
 
-      // Add the file to the zip as a stream — its contents stay on disk until
-      // the zip is generated, so memory doesn't balloon.
       zip.file(`${tablename}.csv`, fs.createReadStream(filePath));
       totalRows += res.rows.length;
     }
 
     await client.end();
 
-    // Generate the zip as a stream to disk (streamFiles keeps memory flat).
+    // Build the zip on disk (memory stays flat).
     const zipPath = path.join(tmp, "backup.zip");
     await new Promise((resolve, reject) => {
       const out = fs.createWriteStream(zipPath);
@@ -104,8 +116,62 @@ exports.handler = async (event) => {
         .pipe(out);
     });
 
-    const sizeMb = (fs.statSync(zipPath).size / (1024 * 1024)).toFixed(1);
+    const bytes = fs.statSync(zipPath).size;
+    const sizeMb = (bytes / (1024 * 1024)).toFixed(1);
+    const date = easternDate();
+    const objectName = `backup-${date}.zip`;
 
+    // Upload the zip to the private Storage bucket (upsert overwrites same-day reruns).
+    const uploadRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${objectName}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SERVICE_KEY}`,
+        "Content-Type": "application/zip",
+        "x-upsert": "true",
+      },
+      body: fs.readFileSync(zipPath),
+    });
+    if (!uploadRes.ok) {
+      throw new Error(`storage upload failed: ${uploadRes.status} ${await uploadRes.text()}`);
+    }
+
+    // Create a signed download link.
+    const signRes = await fetch(`${SUPABASE_URL}/storage/v1/object/sign/${BUCKET}/${objectName}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ expiresIn: LINK_TTL_SECONDS }),
+    });
+    if (!signRes.ok) {
+      throw new Error(`signing link failed: ${signRes.status} ${await signRes.text()}`);
+    }
+    const link = `${SUPABASE_URL}/storage/v1${(await signRes.json()).signedURL}`;
+
+    // Best-effort prune of older backups so Storage doesn't grow forever.
+    try {
+      const listRes = await fetch(`${SUPABASE_URL}/storage/v1/object/list/${BUCKET}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${SERVICE_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ prefix: "", limit: 1000, sortBy: { column: "name", order: "asc" } }),
+      });
+      if (listRes.ok) {
+        const items = (await listRes.json()) || [];
+        const zips = items
+          .map((o) => o.name)
+          .filter((n) => /^backup-\d{4}-\d{2}-\d{2}\.zip$/.test(n))
+          .sort();
+        const stale = zips.slice(0, Math.max(0, zips.length - KEEP_BACKUPS));
+        for (const name of stale) {
+          await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${name}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${SERVICE_KEY}` },
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("prune skipped:", e.message);
+    }
+
+    // Email the link (no attachment).
     const port = Number(process.env.SMTP_PORT) || 465;
     const transporter = nodemailer.createTransport({
       host: process.env.SMTP_HOST,
@@ -114,16 +180,17 @@ exports.handler = async (event) => {
       auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
     });
 
-    const date = easternDate();
     await transporter.sendMail({
       from: process.env.SMTP_USER,
       to: process.env.BACKUP_TO,
       subject: `Supabase backup — ${date}`,
-      text: `Backup complete: ${tables.length} tables, ${totalRows} rows, ${sizeMb} MB.`,
-      attachments: [{ filename: `supabase-backup-${date}.zip`, path: zipPath }],
+      text:
+        `Your Supabase backup is ready.\n\n` +
+        `${tables.length} tables, ${totalRows} rows, ${sizeMb} MB.\n\n` +
+        `Download (link valid 30 days):\n${link}\n`,
     });
 
-    console.log(`done: ${tables.length} tables, ${totalRows} rows, ${sizeMb} MB`);
+    console.log(`done: ${tables.length} tables, ${totalRows} rows, ${sizeMb} MB, uploaded ${objectName}`);
     return { statusCode: 200, body: `done: ${tables.length} tables, ${totalRows} rows, ${sizeMb} MB` };
   } catch (err) {
     console.error("backup failed:", err);
